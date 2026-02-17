@@ -99,7 +99,10 @@ def start_udp_server():
             response = handle_stun_request(data, addr)
             if response:
                 server.sendto(response, addr)
-                print(f"[TX] Sent STUN Response to {addr}")
+                # Log the XOR-MAPPED-ADDRESS being returned to help debug "Double Lock"
+                # The address is embedded in the response payload.
+                # We already calculate it in handle_stun_request, but logging it there or here is good.
+                print(f"[UDP] Sent STUN Response to {addr} | Mapped: {addr[0]}:{addr[1]}")
     except KeyboardInterrupt:
         print("\n[*] UDP Server stopping...")
     finally:

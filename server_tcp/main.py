@@ -3,6 +3,7 @@ import struct
 import threading
 import time
 import sqlite3
+import binascii
 from server_tcp.steam_auth import parse_steam_ticket, validate_steam_ticket, create_auth_response
 from server_tcp.nclmio import build_nclmio_packet
 
@@ -173,7 +174,11 @@ def handle_client(conn, addr):
 
             # Decrypt
             decrypted = xor_crypt(raw_data)
-            # print(f"[RX] {addr} | Len: {len(raw_data)} | Hex: {decrypted.hex()[:64]}...")
+
+            # Diagnostic Logging
+            inferred_cmd = len(decrypted) ^ 0x2E64
+            print(f"[RX] {addr} | Len: {len(raw_data)} | Inferred CMD: {hex(inferred_cmd)}")
+            # print(f"Hex: {binascii.hexlify(decrypted[:32])}...")
 
             # --- Simple State Machine Handling ---
 
@@ -198,9 +203,14 @@ def handle_client(conn, addr):
                         # 4. Send Success Response (CmdMatchmaking Response Logic is also used here usually)
                         # We use create_auth_response which is basically 0x2E04 structure
                         auth_response = create_auth_response(steam_id)
-                        encrypted_res = xor_crypt(auth_response)
+
+                        # Encapsulate in NclMio packet structure (Header + Payload)
+                        # Command ID 0x2E04 (CmdMatchmaking/Auth)
+                        nclmio_packet = build_nclmio_packet(0x2E04, auth_response)
+
+                        encrypted_res = xor_crypt(nclmio_packet)
                         conn.sendall(encrypted_res)
-                        print(f"[TX] Sent Auth Response with Success Flags ({len(auth_response)} bytes)")
+                        print(f"[TX] Sent Auth Response with Success Flags ({len(nclmio_packet)} bytes)")
                     else:
                         print("[TCP] DB Error during Auth")
                 else:
@@ -208,6 +218,8 @@ def handle_client(conn, addr):
 
             # HEURISTIC: State 8 - CmdGetEulaAreaList (0x2EF4)
             # Usually around 144-152 bytes (request size)
+            # Size check: 152 bytes (request) ^ 0x2E64 = 0x2EF4
+            # OR Payload 144 bytes ^ 0x2E64 = 0x2EF4
             elif len(decrypted) >= 140:
                 print(f"[TCP] Received Potential EULA Request (Len: {len(decrypted)})")
 
@@ -250,13 +262,17 @@ def handle_client(conn, addr):
                          print(f"[TCP] CRITICAL ERROR: Server List Payload size is {len(svr_list_payload)} != 128")
 
                      # 3. Encrypt and Send
-                     response = xor_crypt(svr_list_payload)
+                     # Encapsulate in NclMio packet structure (Header + Payload)
+                     # Command ID 0x2EE4 (CmdGetSvrList)
+                     nclmio_packet = build_nclmio_packet(0x2EE4, svr_list_payload)
+
+                     response = xor_crypt(nclmio_packet)
                      conn.sendall(response)
-                     print(f"[TX] Sent Server List (128 bytes)")
+                     print(f"[TX] Sent Server List ({len(nclmio_packet)} bytes)")
 
                  else:
-                     # Assume Matchmaking Request (State 10 Transition)
-                     # Or general KeepAlive/Ack
+                     # Assume Matchmaking Request (State 10 Transition) or Final Ready Check
+                     # Could be 0x2EE2 or 0x2E04
                      print(f"[TCP] Received Generic/Matchmaking Request (Len: {len(decrypted)})")
 
                      # Respond with Matchmaking/Auth Success packet to force State 10
@@ -264,9 +280,14 @@ def handle_client(conn, addr):
                      ip_to_inject = client_ctx["public_ip"] if client_ctx["public_ip"] else "127.0.0.1"
 
                      mm_response = create_matchmaking_response(ip_to_inject)
-                     encrypted_mm = xor_crypt(mm_response)
+
+                     # Encapsulate in NclMio packet structure (Header + Payload)
+                     # Command ID 0x2E04 (CmdMatchmaking)
+                     nclmio_packet = build_nclmio_packet(0x2E04, mm_response)
+
+                     encrypted_mm = xor_crypt(nclmio_packet)
                      conn.sendall(encrypted_mm)
-                     print(f"[TX] Sent Matchmaking/Success Response (IP: {ip_to_inject})")
+                     print(f"[TX] Sent Matchmaking/Success Response (IP: {ip_to_inject}, Len: {len(nclmio_packet)})")
 
 
     except ConnectionResetError:
