@@ -4,6 +4,7 @@ import threading
 import time
 import sqlite3
 from server_tcp.steam_auth import parse_steam_ticket, validate_steam_ticket, create_auth_response
+from server_tcp.nclmio import build_nclmio_packet
 
 # --- Configuration ---
 HOST = '0.0.0.0'
@@ -138,6 +139,25 @@ def create_matchmaking_response(public_ip_str):
 
     return bytes(payload)
 
+def create_eula_response():
+    """
+    Constructs the response for CmdGetEulaAreaList (0x2EF4).
+    Required: Region Code at offset +0x10 ("FRA" -> 46 52 41).
+    Heuristic Size: 144 bytes seems appropriate for this structure (aligned).
+    """
+    payload = bytearray(144)
+
+    # Offset +0x10 (16): Region Code "FRA"
+    payload[16] = 0x46 # F
+    payload[17] = 0x52 # R
+    payload[18] = 0x41 # A
+    payload[19] = 0x00 # Null terminator
+
+    # Offset +0x14 (20): EULA ID/Version (Maybe 1?)
+    payload[20] = 0x01
+
+    return bytes(payload)
+
 # --- Connection Handler ---
 def handle_client(conn, addr):
     print(f"[TCP] New connection from {addr}")
@@ -159,7 +179,7 @@ def handle_client(conn, addr):
 
             # HEURISTIC: State 5 - CmdLobbyInit (Steam Ticket)
             # Usually a large packet > 64 bytes
-            if len(decrypted) > 64:
+            if len(decrypted) > 64 and len(decrypted) < 140:
                 print(f"[TCP] Received Potential Auth Ticket (Len: {len(decrypted)})")
 
                 # 1. Parse Packet (CmdLobbyInit)
@@ -186,23 +206,25 @@ def handle_client(conn, addr):
                 else:
                     print("[TCP] Steam Ticket Invalid")
 
-            # HEURISTIC: State 6 - CmdGetSvrList
-            # Usually a small packet request, length around 32-64 bytes?
-            # Or specifically looking for the "Handover" packet which contains the STUN IP.
-            # The user states: "Cmd 0x2EE4" payload has IP at +0x04.
+            # HEURISTIC: State 8 - CmdGetEulaAreaList (0x2EF4)
+            # Usually around 144-152 bytes (request size)
+            elif len(decrypted) >= 140:
+                print(f"[TCP] Received Potential EULA Request (Len: {len(decrypted)})")
+
+                eula_response = create_eula_response()
+                # Encapsulate in NclMio packet structure (Header + Payload)
+                # Command ID for EULA Response? 0x2EF4 is the request.
+                # Response usually same ID or related. Let's use 0x2EF4 for now as per analysis.
+                nclmio_packet = build_nclmio_packet(0x2EF4, eula_response)
+
+                encrypted_eula = xor_crypt(nclmio_packet)
+                conn.sendall(encrypted_eula)
+                print(f"[TX] Sent EULA Response (Region: FRA, Len: {len(nclmio_packet)} bytes)")
+
+            # HEURISTIC: State 6 / State 10
+            # Small packets < 64 bytes
             elif len(decrypted) < 64:
                  # Check if this is explicitly CmdGetSvrList or CmdMatchmaking
-                 # We don't have perfect packet ID extraction (it's XOR'd with a rolling key/mask usually)
-                 # But we can infer based on content.
-
-                 # Case A: Server List Request (Handover IP at +0x04)
-                 # If we see an IP-like structure at +0x04, it's likely State 6.
-
-                 # Case B: Matchmaking Request (CmdMatchmaking 0x2E04)
-                 # Also small packet.
-
-                 # For now, let's assume the flow is sequential: Auth -> List -> Matchmaking.
-                 # But sticking to the Server List logic first if we extract an IP.
 
                  is_handover = False
                  if len(decrypted) >= 8:
