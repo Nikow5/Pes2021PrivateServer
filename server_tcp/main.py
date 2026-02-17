@@ -6,6 +6,7 @@ import sqlite3
 import binascii
 from server_tcp.steam_auth import parse_steam_ticket, validate_steam_ticket, create_auth_response
 from server_tcp.nclmio import build_nclmio_packet
+from server_tcp.utils import get_command_id
 
 # --- Configuration ---
 HOST = '0.0.0.0'
@@ -175,15 +176,17 @@ def handle_client(conn, addr):
             # Decrypt
             decrypted = xor_crypt(raw_data)
 
-            # Diagnostic Logging
-            inferred_cmd = len(decrypted) ^ 0x2E64
-            print(f"[RX] {addr} | Len: {len(raw_data)} | Inferred CMD: {hex(inferred_cmd)}")
-            # print(f"Hex: {binascii.hexlify(decrypted[:32])}...")
+            # Robust Command Detection
+            cmd_id, payload_len = get_command_id(decrypted)
 
-            # --- Simple State Machine Handling ---
+            # Fallback for State 5 (Auth) which might not follow standard length rule or we want to keep heuristic
+            # But let's log the calculated ID
+            print(f"[RX] {addr} | RawLen: {len(raw_data)} | HeaderLen: {payload_len} | CalcCMD: {hex(cmd_id) if cmd_id else 'None'}")
 
-            # HEURISTIC: State 5 - CmdLobbyInit (Steam Ticket)
-            # Usually a large packet > 64 bytes
+            # --- State Machine Handling ---
+
+            # STATE 5: CmdLobbyInit (Steam Ticket)
+            # Heuristic: Large packet > 64 bytes, but not EULA size.
             if len(decrypted) > 64 and len(decrypted) < 140:
                 print(f"[TCP] Received Potential Auth Ticket (Len: {len(decrypted)})")
 
@@ -226,10 +229,16 @@ def handle_client(conn, addr):
                 # Token Mirroring Logic
                 # The issue states: "Mirror Mode: CmdObject + 0x0C... expect token of 16/32 bytes"
                 # User's recent analysis suggests mirroring the first 8 bytes of the request.
-                # Let's mirror the first 8 bytes of the request into the response.
+                # NOTE: 'decrypted' contains 8 bytes of NclMio Header + Payload.
+                # Request Token is at Payload +0x00 (Decrypted +0x08).
 
-                request_token = decrypted[0:8]
-                print(f"[TCP] Mirroring Token: {binascii.hexlify(request_token)}")
+                # IMPORTANT: The user's analysis said "copier les 8 premiers octets de la requête client".
+                # If they meant the *payload* bytes, it's decrypted[8:16].
+                # If they meant the *decrypted header* (which contains sequence/ID), it's decrypted[0:8].
+                # Standard practice for "Token Mirror" usually implies the session token in the PAYLOAD.
+                # Let's mirror the payload bytes to be safe for session continuity.
+                request_token = decrypted[8:16]
+                print(f"[TCP] Mirroring Token (Payload): {binascii.hexlify(request_token)}")
 
                 eula_response = create_eula_response()
 
@@ -248,11 +257,45 @@ def handle_client(conn, addr):
                 conn.sendall(encrypted_eula)
                 print(f"[TX] Sent EULA Response (Region: FRA, Len: {len(nclmio_packet)} bytes)")
 
-            # HEURISTIC: State 6 / State 10
-            # Small packets < 64 bytes
-            elif len(decrypted) < 64:
-                 # Check if this is explicitly CmdGetSvrList or CmdMatchmaking
+            # STATE 9/10: CmdMatchmaking / Auth Check (0x2E04)
+            elif cmd_id == 0x2E04:
+                print(f"[TCP] Received Auth/Matchmaking Check (0x2E04)")
 
+                # 1. Prepare Payload (96 bytes suggested for 0x2E04)
+                # If we send 0x2E04, payload length must satisfy: Len ^ 0x2E64 = 0x2E04
+                # Len = 0x2E04 ^ 0x2E64 = 0x60 = 96 bytes.
+                # create_matchmaking_response currently makes 64 bytes. Let's pad it or update it.
+
+                ip_to_inject = client_ctx["public_ip"] if client_ctx["public_ip"] else "127.0.0.1"
+
+                # We need a 96-byte payload. create_matchmaking_response does 64.
+                # Let's manually construct here or update helper.
+                mm_response = create_matchmaking_response(ip_to_inject)
+
+                # Pad to 96 bytes
+                if len(mm_response) < 96:
+                    mm_response += b'\x00' * (96 - len(mm_response))
+
+                # 2. Token Mirroring (First 8 bytes of PAYLOAD -> Response)
+                # 'decrypted' has 8-byte NclMio header at start.
+                # Mirror the payload token at +0x08.
+                request_token = decrypted[8:16]
+
+                response_mutable = bytearray(mm_response)
+                response_mutable[0:8] = request_token
+                mm_response = bytes(response_mutable)
+
+                # 3. Encapsulate
+                nclmio_packet = build_nclmio_packet(0x2E04, mm_response)
+
+                encrypted_mm = xor_crypt(nclmio_packet)
+                conn.sendall(encrypted_mm)
+                print(f"[TX] Sent 0x2E04 Response (Double Lock Flags + Mirror + IP) | Len: {len(nclmio_packet)}")
+
+            # STATE 6: CmdGetSvrList
+            # Fallback heuristic if cmd_id detection fails or for simple small packets
+            elif len(decrypted) < 64:
+                 # Check if this is explicitly CmdGetSvrList
                  is_handover = False
                  if len(decrypted) >= 8:
                      # Check if bytes at 4-8 look like a valid IP (not 0.0.0.0)
@@ -273,36 +316,11 @@ def handle_client(conn, addr):
                      # 2. Construct Server List Response (128 bytes)
                      svr_list_payload = create_server_list_response()
 
-                     if len(svr_list_payload) != 128:
-                         print(f"[TCP] CRITICAL ERROR: Server List Payload size is {len(svr_list_payload)} != 128")
-
                      # 3. Encrypt and Send
-                     # Encapsulate in NclMio packet structure (Header + Payload)
-                     # Command ID 0x2EE4 (CmdGetSvrList)
                      nclmio_packet = build_nclmio_packet(0x2EE4, svr_list_payload)
-
                      response = xor_crypt(nclmio_packet)
                      conn.sendall(response)
                      print(f"[TX] Sent Server List ({len(nclmio_packet)} bytes)")
-
-                 else:
-                     # Assume Matchmaking Request (State 10 Transition) or Final Ready Check
-                     # Could be 0x2EE2 or 0x2E04
-                     print(f"[TCP] Received Generic/Matchmaking Request (Len: {len(decrypted)})")
-
-                     # Respond with Matchmaking/Auth Success packet to force State 10
-                     # Inject the Public IP we captured earlier (or loopback if none)
-                     ip_to_inject = client_ctx["public_ip"] if client_ctx["public_ip"] else "127.0.0.1"
-
-                     mm_response = create_matchmaking_response(ip_to_inject)
-
-                     # Encapsulate in NclMio packet structure (Header + Payload)
-                     # Command ID 0x2E04 (CmdMatchmaking)
-                     nclmio_packet = build_nclmio_packet(0x2E04, mm_response)
-
-                     encrypted_mm = xor_crypt(nclmio_packet)
-                     conn.sendall(encrypted_mm)
-                     print(f"[TX] Sent Matchmaking/Success Response (IP: {ip_to_inject}, Len: {len(nclmio_packet)})")
 
 
     except ConnectionResetError:
