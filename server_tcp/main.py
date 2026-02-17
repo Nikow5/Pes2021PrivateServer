@@ -3,6 +3,7 @@ import struct
 import threading
 import time
 import sqlite3
+from server_tcp.steam_auth import parse_steam_ticket, validate_steam_ticket, create_auth_response
 
 # --- Configuration ---
 HOST = '0.0.0.0'
@@ -20,20 +21,34 @@ def xor_crypt(data):
     return bytes([b ^ XOR_KEY[i % 4] for i, b in enumerate(data)])
 
 # --- Database Access ---
-def get_user_by_ticket(steam_ticket):
+def get_user_by_steamid(steam_id):
     """
-    Simulates Steam Ticket validation.
-    In reality, we would call Steam Web API.
-    For now, we return the mock user.
+    Retrieves or creates a user based on SteamID64.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        # Mock Logic: Assume ticket is valid and matches our TestUser
-        # In prod: decode ticket -> get steam_id -> query DB
-        cursor.execute("SELECT id, username, region_code FROM users LIMIT 1")
+        cursor.execute("SELECT id, username, region_code FROM users WHERE steam_id = ?", (steam_id,))
         user = cursor.fetchone()
+
+        if not user:
+            print(f"[DB] Registering new user: {steam_id}")
+            # Register new user
+            cursor.execute("INSERT INTO users (steam_id, username, region_code) VALUES (?, ?, ?)",
+                           (steam_id, f"User_{steam_id[-4:]}", "UNK"))
+            conn.commit()
+
+            # Initialize Stats
+            user_id = cursor.lastrowid
+            cursor.execute("INSERT INTO myclub_stats (user_id) VALUES (?)", (user_id,))
+            conn.commit()
+
+            # Retrieve again
+            cursor.execute("SELECT id, username, region_code FROM users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+
         conn.close()
         return user
     except Exception as e:
@@ -90,20 +105,33 @@ def handle_client(conn, addr):
             # Let's assume any large packet > 64 bytes early on is Auth
             if len(decrypted) > 64:
                 print(f"[TCP] Received Potential Auth Ticket (Len: {len(decrypted)})")
-                user = get_user_by_ticket(decrypted)
 
-                if user:
-                    print(f"[TCP] Authenticated User: {user[1]} (ID: {user[0]})")
-                    # Send Auth Success Response (CmdLobbyInit Response)
-                    # Structure unknown, usually just 0x00000000 or similar success code?
-                    # TODO: Reverse engineer exact response format for CmdLobbyInit
-                    pass
+                # 1. Parse Packet (CmdLobbyInit)
+                ticket = parse_steam_ticket(decrypted)
+
+                # 2. Validate Ticket (Steam Web API)
+                steam_id = validate_steam_ticket(ticket)
+
+                if steam_id:
+                    # 3. DB Lookup / Registration
+                    user = get_user_by_steamid(steam_id)
+
+                    if user:
+                        print(f"[TCP] Authenticated User: {user['username']} (ID: {user['id']})")
+
+                        # 4. Send Success Response (with Flags 0x01)
+                        auth_response = create_auth_response(steam_id)
+                        encrypted_res = xor_crypt(auth_response)
+                        conn.sendall(encrypted_res)
+                        print(f"[TX] Sent Auth Response with Success Flags ({len(auth_response)} bytes)")
+                    else:
+                        print("[TCP] DB Error during Auth")
                 else:
-                    print("[TCP] Auth Failed")
+                    print("[TCP] Steam Ticket Invalid")
 
             # HEURISTIC: State 6 - CmdGetSvrList
             # Usually a small packet request
-            if len(decrypted) < 64:
+            elif len(decrypted) < 64:
                  print(f"[TCP] Received Server List Request")
 
                  # Prepare Server List
