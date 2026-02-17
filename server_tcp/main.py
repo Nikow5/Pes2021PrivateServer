@@ -62,31 +62,58 @@ def create_server_entry(server_id, server_type, ip_str, port):
     CRITICAL: Must start with VTable 0x14285B5B0.
     """
     # 1. VTable (8 bytes, Little Endian) -> 0x14285B5B0
-    vtable = struct.pack('<Q', 0x14285B5B0)
+    # Expected: B0 5B 85 42 01 00 00 00
+    # NOTE: Python's struct '<Q' might pack 0x14285B5B0 differently depending on interpretation.
+    # 0x14285B5B0 -> B0 5B 85 42 01 00 00 00
+    # Let's use explicit byte construction to be safe and match the requirement exactly.
+    vtable = b'\xB0\x5B\x85\x42\x01\x00\x00\x00'
 
     # 2. Server ID (4 bytes, Big Endian)
     sid = struct.pack('>I', server_id)
 
-    # 3. Server Type (4 bytes, Little Endian)
-    stype = struct.pack('<I', server_type)
+    # 3. Server Type (4 bytes, Big Endian - Convention changed to BE based on recent info)
+    stype = struct.pack('>I', server_type)
 
-    # 4. IP Address (4 bytes)
+    # 4. IP Address (4 bytes, Network Byte Order)
     ip_bytes = socket.inet_aton(ip_str)
 
     # 5. Port (2 bytes, Little Endian)
     port_bytes = struct.pack('<H', port)
 
-    # Construct the payload
+    # Construct the payload (22 bytes)
     payload = vtable + sid + stype + ip_bytes + port_bytes
 
-    # Padding to 32 bytes
+    # Padding to 32 bytes (10 bytes)
     padding = b'\x00' * (32 - len(payload))
 
     return payload + padding
 
+def create_server_list_response():
+    """
+    Generates the full 128-byte payload for CmdGetSvrList (0x2EE4).
+    Contains 4 server entries.
+    """
+    # 1. Real Server (ConnectGate / Game Server)
+    # Using local IP for emulation
+    entry1 = create_server_entry(1, 1, "127.0.0.1", 5739)
+
+    # 2. Dummy Server 2
+    entry2 = create_server_entry(2, 1, "127.0.0.1", 10000)
+
+    # 3. Dummy Server 3
+    entry3 = create_server_entry(3, 1, "127.0.0.1", 10000)
+
+    # 4. Dummy Server 4
+    entry4 = create_server_entry(4, 1, "127.0.0.1", 10000)
+
+    # Total Payload: 128 bytes
+    return entry1 + entry2 + entry3 + entry4
+
 # --- Connection Handler ---
 def handle_client(conn, addr):
     print(f"[TCP] New connection from {addr}")
+    client_ctx = {"public_ip": None}
+
     try:
         while True:
             # Receive data
@@ -101,8 +128,7 @@ def handle_client(conn, addr):
             # --- Simple State Machine Handling ---
 
             # HEURISTIC: State 5 - CmdLobbyInit (Steam Ticket)
-            # Usually a large packet (ticket size ~200-400 bytes or more)
-            # Let's assume any large packet > 64 bytes early on is Auth
+            # Usually a large packet > 64 bytes
             if len(decrypted) > 64:
                 print(f"[TCP] Received Potential Auth Ticket (Len: {len(decrypted)})")
 
@@ -130,18 +156,33 @@ def handle_client(conn, addr):
                     print("[TCP] Steam Ticket Invalid")
 
             # HEURISTIC: State 6 - CmdGetSvrList
-            # Usually a small packet request
+            # Usually a small packet request, length around 32-64 bytes?
+            # Or specifically looking for the "Handover" packet which contains the STUN IP.
+            # The user states: "Cmd 0x2EE4" payload has IP at +0x04.
+            # Let's assume this is the request for the server list.
             elif len(decrypted) < 64:
-                 print(f"[TCP] Received Server List Request")
+                 print(f"[TCP] Received Server List Request (CmdGetSvrList)")
 
-                 # Prepare Server List
-                 # Entry 1: ConnectGate itself (or Game Server)
-                 entry1 = create_server_entry(1, 1, "127.0.0.1", 5739)
+                 # 1. Extract Handover IP (STUN Public IP)
+                 # Offset +0x04 (4 bytes)
+                 if len(decrypted) >= 8:
+                     stun_ip_bytes = decrypted[4:8]
+                     try:
+                         client_ctx["public_ip"] = socket.inet_ntoa(stun_ip_bytes)
+                         print(f"[TCP] Captured Client Public IP (STUN): {client_ctx['public_ip']}")
+                     except:
+                         print("[TCP] Failed to parse STUN IP")
 
-                 # Send
-                 response = xor_crypt(entry1)
+                 # 2. Construct Server List Response (128 bytes)
+                 svr_list_payload = create_server_list_response()
+
+                 if len(svr_list_payload) != 128:
+                     print(f"[TCP] CRITICAL ERROR: Server List Payload size is {len(svr_list_payload)} != 128")
+
+                 # 3. Encrypt and Send
+                 response = xor_crypt(svr_list_payload)
                  conn.sendall(response)
-                 print(f"[TX] Sent Server List Entry ({len(entry1)} bytes)")
+                 print(f"[TX] Sent Server List (128 bytes)")
 
     except ConnectionResetError:
         print(f"[TCP] Connection reset by {addr}")

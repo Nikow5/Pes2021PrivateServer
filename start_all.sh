@@ -13,13 +13,13 @@ echo "[*] Initializing Database..."
 python3 database/init_db.py
 
 echo "[*] Starting TCP ConnectGate Server (Port 5739)..."
-python3 server_tcp/main.py &
+python3 -m server_tcp.main &
 
 echo "[*] Starting UDP STUN Server (Port 5730)..."
-python3 server_udp/stun_server.py &
+python3 -m server_udp.stun_server &
 
 echo "[*] Starting HTTP API Server (Port 5000)..."
-python3 server_http/api_server.py &
+python3 -m server_http.api_server &
 
 echo "[*] All servers started. Press Ctrl+C to stop."
 wait
