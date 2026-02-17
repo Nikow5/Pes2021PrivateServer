@@ -7,7 +7,7 @@ from server_tcp.steam_auth import parse_steam_ticket, validate_steam_ticket, cre
 
 # --- Configuration ---
 HOST = '0.0.0.0'
-PORT = 5739
+PORT = 10000 # Changed to 10000 as per user request (Client connects here)
 DB_PATH = 'pes2021.db'
 
 # --- Crypto ---
@@ -95,10 +95,11 @@ def create_server_list_response():
     """
     # 1. Real Server (ConnectGate / Game Server)
     # Using local IP for emulation
-    entry1 = create_server_entry(1, 1, "127.0.0.1", 5739)
+    # Pointing to 10000 as the main server now
+    entry1 = create_server_entry(1, 1, "127.0.0.1", 10000)
 
     # 2. Dummy Server 2
-    entry2 = create_server_entry(2, 1, "127.0.0.1", 10000)
+    entry2 = create_server_entry(2, 1, "127.0.0.1", 5739)
 
     # 3. Dummy Server 3
     entry3 = create_server_entry(3, 1, "127.0.0.1", 10000)

@@ -12,7 +12,7 @@ trap cleanup SIGINT
 echo "[*] Initializing Database..."
 python3 database/init_db.py
 
-echo "[*] Starting TCP ConnectGate Server (Port 5739)..."
+echo "[*] Starting TCP ConnectGate Server (Port 10000)..."
 python3 -m server_tcp.main &
 
 echo "[*] Starting UDP STUN Server (Port 5730)..."
