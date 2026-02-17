@@ -223,7 +223,22 @@ def handle_client(conn, addr):
             elif len(decrypted) >= 140:
                 print(f"[TCP] Received Potential EULA Request (Len: {len(decrypted)})")
 
+                # Token Mirroring Logic
+                # The issue states: "Mirror Mode: CmdObject + 0x0C... expect token of 16/32 bytes"
+                # User's recent analysis suggests mirroring the first 8 bytes of the request.
+                # Let's mirror the first 8 bytes of the request into the response.
+
+                request_token = decrypted[0:8]
+                print(f"[TCP] Mirroring Token: {binascii.hexlify(request_token)}")
+
                 eula_response = create_eula_response()
+
+                # Apply Token Mirror (Overwriting first 8 bytes of empty payload)
+                # Ensure eula_response is mutable or reconstruct it
+                response_mutable = bytearray(eula_response)
+                response_mutable[0:8] = request_token
+                eula_response = bytes(response_mutable)
+
                 # Encapsulate in NclMio packet structure (Header + Payload)
                 # Command ID for EULA Response? 0x2EF4 is the request.
                 # Response usually same ID or related. Let's use 0x2EF4 for now as per analysis.
