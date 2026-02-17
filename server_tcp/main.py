@@ -119,8 +119,9 @@ def create_matchmaking_response(public_ip_str):
     CRITICAL: Must set AuthStatus (+32) and ReadyStatus (+33) to 0x01.
     Injects Public IP at +0x24.
     """
-    # Size: Typically 64 bytes is sufficient for this ack.
-    payload = bytearray(64)
+    # Size: 96 bytes (0x60) is required for correct Command ID inference (0x60 ^ 0x2E64 = 0x2E04).
+    # Previous 64 bytes caused 0x40 ^ 0x2E64 = 0x2E24 (Unknown Cmd) -> Error C_IDGG_0002.
+    payload = bytearray(96)
 
     # +0x20 (32): AuthStatus = 1
     payload[32] = 0x01
@@ -268,13 +269,9 @@ def handle_client(conn, addr):
 
                 ip_to_inject = client_ctx["public_ip"] if client_ctx["public_ip"] else "127.0.0.1"
 
-                # We need a 96-byte payload. create_matchmaking_response does 64.
-                # Let's manually construct here or update helper.
+                # 1. Prepare Payload (96 bytes suggested for 0x2E04)
+                # Helper now returns 96 bytes by default.
                 mm_response = create_matchmaking_response(ip_to_inject)
-
-                # Pad to 96 bytes
-                if len(mm_response) < 96:
-                    mm_response += b'\x00' * (96 - len(mm_response))
 
                 # 2. Token Mirroring (First 8 bytes of PAYLOAD -> Response)
                 # 'decrypted' has 8-byte NclMio header at start.
