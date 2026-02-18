@@ -4,6 +4,7 @@ import threading
 import time
 import sqlite3
 import binascii
+import zlib
 from server_tcp.steam_auth import parse_steam_ticket, validate_steam_ticket, create_auth_response
 from server_tcp.nclmio import build_nclmio_packet
 from server_tcp.utils import get_command_id
@@ -180,9 +181,19 @@ def handle_client(conn, addr):
             # Robust Command Detection
             cmd_id, payload_len = get_command_id(decrypted)
 
+            # Extract Sequence ID from Header (bytes 4-8)
+            # Standard NclMio Header: [Cmd(2)][Len(2)][Seq(4)]
+            # We must mirror this sequence in our response.
+            seq_id = 0
+            if len(decrypted) >= 8:
+                try:
+                    seq_id = struct.unpack('>I', decrypted[4:8])[0]
+                except:
+                    pass
+
             # Fallback for State 5 (Auth) which might not follow standard length rule or we want to keep heuristic
             # But let's log the calculated ID
-            print(f"[RX] {addr} | RawLen: {len(raw_data)} | HeaderLen: {payload_len} | CalcCMD: {hex(cmd_id) if cmd_id else 'None'}")
+            print(f"[RX] {addr} | RawLen: {len(raw_data)} | HeaderLen: {payload_len} | CalcCMD: {hex(cmd_id) if cmd_id else 'None'} | Seq: {seq_id}")
 
             # --- State Machine Handling ---
 
@@ -205,16 +216,17 @@ def handle_client(conn, addr):
                         print(f"[TCP] Authenticated User: {user['username']} (ID: {user['id']})")
 
                         # 4. Send Success Response (CmdMatchmaking Response Logic is also used here usually)
-                        # We use create_auth_response which is basically 0x2E04 structure
-                        auth_response = create_auth_response(steam_id)
+                        # We use create_matchmaking_response which is basically 0x2E04 structure but 96 bytes
+                        # NOTE: create_auth_response in steam_auth.py was making 64 bytes -> 0x2E24 (Error)
+                        auth_response = create_matchmaking_response(client_ctx["public_ip"] if client_ctx["public_ip"] else "127.0.0.1")
 
                         # Encapsulate in NclMio packet structure (Header + Payload)
                         # Command ID 0x2E04 (CmdMatchmaking/Auth)
-                        nclmio_packet = build_nclmio_packet(0x2E04, auth_response)
+                        nclmio_packet = build_nclmio_packet(0x2E04, auth_response, seq_id)
 
                         encrypted_res = xor_crypt(nclmio_packet)
                         conn.sendall(encrypted_res)
-                        print(f"[TX] Sent Auth Response with Success Flags ({len(nclmio_packet)} bytes)")
+                        print(f"[TX] Sent Auth Response 0x2E04 (Len: {len(nclmio_packet)})")
                     else:
                         print("[TCP] DB Error during Auth")
                 else:
@@ -252,7 +264,7 @@ def handle_client(conn, addr):
                 # Encapsulate in NclMio packet structure (Header + Payload)
                 # Command ID for EULA Response? 0x2EF4 is the request.
                 # Response usually same ID or related. Let's use 0x2EF4 for now as per analysis.
-                nclmio_packet = build_nclmio_packet(0x2EF4, eula_response)
+                nclmio_packet = build_nclmio_packet(0x2EF4, eula_response, seq_id)
 
                 encrypted_eula = xor_crypt(nclmio_packet)
                 conn.sendall(encrypted_eula)
@@ -283,7 +295,7 @@ def handle_client(conn, addr):
                 mm_response = bytes(response_mutable)
 
                 # 3. Encapsulate
-                nclmio_packet = build_nclmio_packet(0x2E04, mm_response)
+                nclmio_packet = build_nclmio_packet(0x2E04, mm_response, seq_id)
 
                 encrypted_mm = xor_crypt(nclmio_packet)
                 conn.sendall(encrypted_mm)
@@ -313,8 +325,13 @@ def handle_client(conn, addr):
                      # 2. Construct Server List Response (128 bytes)
                      svr_list_payload = create_server_list_response()
 
-                     # 3. Encrypt and Send
-                     nclmio_packet = build_nclmio_packet(0x2EE4, svr_list_payload)
+                     # 3. Compress with ZLIB (Required for 0x2EE4)
+                     # Standard zlib.compress includes header and Adler32 footer.
+                     compressed_payload = zlib.compress(svr_list_payload)
+                     print(f"[TCP] Server List Compressed: {len(svr_list_payload)} -> {len(compressed_payload)} bytes")
+
+                     # 4. Encrypt and Send
+                     nclmio_packet = build_nclmio_packet(0x2EE4, compressed_payload, seq_id)
                      response = xor_crypt(nclmio_packet)
                      conn.sendall(response)
                      print(f"[TX] Sent Server List ({len(nclmio_packet)} bytes)")
